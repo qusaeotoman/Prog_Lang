@@ -1,0 +1,47 @@
+
+int readInt()
+{
+    0;
+}
+
+void writeInt(int n)
+{
+}
+
+int fib(int n)
+{
+    int r;
+    if (n < 2) {
+        r = 1;
+    } else {
+        r = fib(n - 1) + fib(n - 2);
+    }
+    r;
+}
+
+int main()
+{
+    int value, arg;
+    char op;
+    value = 0;
+
+    op = read_byte();
+    while (op != 'q') {
+        arg = readInt();
+        if (op == '+') {
+            value = value + arg;
+        } else if (op == '-') {
+            value = value - arg;
+        } else if (op == '*') {
+            value = value * arg;
+        } else if (op == '/') {
+            value = value / arg;
+        } else if (op == 'f') {
+            value = fib(value);
+        }
+        writeInt(value);
+        op = read_byte();
+    }
+
+    value;
+}

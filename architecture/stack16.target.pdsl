@@ -1,0 +1,597 @@
+architecture stack16 {
+
+	/*
+		case                stack16
+		data word length    4
+		code model          stack-based
+		spaces              code+const, data
+	*/
+
+	registers:
+
+		storage ip [32];   // instruction pointer (byte address)
+		storage sp [32];   // stack pointer (stack in data, grows down, 4-byte words)
+		storage bp [32];   // base/frame pointer for stack frames
+		storage hp [32];   // heap base pointer (start of dmem; stores heap head)
+
+		// volatile temporaries used by instructions; not preserved across ops
+		storage t0 [32];
+		storage t1 [32];
+		storage t2 [32];
+
+		storage rin [8];   // input port
+		storage rout [8];  // output port
+
+	memory:
+
+		// code + embedded constants (logical 64K bank)
+		range code [0x0000 .. 0xffff] {
+			cell = 8;
+			endianess = little-endian;
+			granularity = 2;
+		}
+
+		// data bank; stack lives here and grows down from top of the bank
+		range dmem [0x0000 .. 0xffff] {
+			cell = 8;
+			endianess = little-endian;
+			granularity = 2;
+		}
+
+	instructions:
+
+		encode imm16 field = immediate [16];
+		encode imm32 field = immediate [32];
+
+		// unconditional jump (absolute)
+		instruction jmp = { 0001 0000, imm16 as target } {
+			ip = target;
+		};
+
+		// jump if top-of-stack == 0; pops 1 word
+		instruction jz = { 0001 0001, imm16 as target } {
+			t0 = dmem:4[sp];   // use temp
+			sp = sp + 4;
+			if t0 != 0 then
+				ip = ip + 3;   // non-zero -> no jump
+			else
+				ip = target;   // zero -> jump
+		};
+
+		// jump if top-of-stack != 0; pops 1 word
+		instruction jnz = { 0001 0010, imm16 as target } {
+			t0 = dmem:4[sp];   // use temp
+			sp = sp + 4;
+			if t0 != 0 then
+				ip = target;   // non-zero -> jump
+			else
+				ip = ip + 3;   // zero -> skip jump
+		};
+
+		// call absolute; pushes return address (next instruction) on stack
+		instruction call = { 0001 0011, imm16 as target } {
+			// caller already pushed args; prologue saves return + bp, then sets new bp
+			sp = sp - 4;
+			dmem:4[sp] = ip + 3;  // return address
+			sp = sp - 4;
+			dmem:4[sp] = bp;      // save caller bp
+			bp = sp;              // establish frame pointer (bp -> saved bp)
+			ip = target;
+		};
+
+		// return; pops ip from stack
+		instruction ret = { 0001 0100 } {
+			// frame layout at bp:
+			// [bp+0] saved bp, [bp+4] return, [bp+8...] caller args / return value
+			t0 = dmem:4[bp];        // old bp
+			ip = dmem:4[bp + 4];    // return address
+			// convention: callee stores return value at [bp+8] before ret
+			sp = bp + 8;            // drop frame, leave args (and return value) for caller
+			bp = t0;
+		};
+
+		// stop execution
+		instruction hlt = { 0001 0101 } {
+		};
+
+		// --- stack operations (16-bit words) ---
+
+		// set stack pointer to immediate (use to initialize stack before pushes)
+		instruction ldsp = { 0001 0110, imm16 as value } {
+			sp = value;
+			ip = ip + 3;
+		};
+
+		// set heap base pointer to immediate (use to initialize heap head)
+		instruction ldhp = { 0010 1000, imm16 as value } {
+			hp = value;
+			ip = ip + 3;
+		};
+
+		// push immediate 32-bit value
+		instruction push = { 0001 1000, imm32 as value } {
+			sp = sp - 4;
+			dmem:4[sp] = value;
+			ip = ip + 5;
+		};
+
+		// drop top of stack
+		instruction drop = { 0001 1001 } {
+			sp = sp + 4;
+			ip = ip + 1;
+		};
+
+		// load 8-bit: pop address, push zero-extended byte at [address]
+		instruction load1 = { 0011 0000 } {
+			t0 = dmem:4[sp];             // addr
+			dmem:4[sp] = dmem:1[t0];     // overwrite with loaded byte (zero-extended)
+			ip = ip + 1;
+		};
+
+		// load 16-bit: pop address, push zero-extended word at [address]
+		instruction load2 = { 0011 0001 } {
+			t0 = dmem:4[sp];             // addr
+			dmem:4[sp] = dmem:2[t0];     // overwrite with loaded word (zero-extended)
+			ip = ip + 1;
+		};
+
+		// load 32-bit: pop address, push dword at [address]
+		instruction load = { 0011 0010 } {
+			t0 = dmem:4[sp];             // addr
+			dmem:4[sp] = dmem:4[t0];     // overwrite with loaded dword
+			ip = ip + 1;
+		};
+
+		// store 8-bit: pop value and address (addr under value) -> memory[addr] = value8
+		instruction store1 = { 0011 0011 } {
+			t0 = dmem:4[sp + 4];         // addr
+			t1 = dmem:4[sp];             // value
+			dmem:1[t0] = t1;
+			sp = sp + 8;
+			ip = ip + 1;
+		};
+
+		// store 16-bit: pop value and address (addr under value) -> memory[addr] = value16
+		instruction store2 = { 0011 0100 } {
+			t0 = dmem:4[sp + 4];         // addr
+			t1 = dmem:4[sp];             // value
+			dmem:2[t0] = t1;
+			sp = sp + 8;
+			ip = ip + 1;
+		};
+
+		// store 32-bit: pop value and address (addr under value) -> memory[addr] = value32
+		instruction store = { 0011 0101 } {
+			t0 = dmem:4[sp + 4];         // addr
+			t1 = dmem:4[sp];             // value
+			dmem:4[t0] = t1;
+			sp = sp + 8;
+			ip = ip + 1;
+		};
+
+		// swap top two stack dwords
+		instruction swap = { 0010 0001 } {
+			t0 = dmem:4[sp];
+			t1 = dmem:4[sp + 4];
+			dmem:4[sp] = t1;
+			dmem:4[sp + 4] = t0;
+			ip = ip + 1;
+		};
+
+		// duplicate top of stack: push copy of top element
+		instruction dup = { 0010 0010 } {
+			t0 = dmem:4[sp];   // read top element
+			sp = sp - 4;        // allocate space for duplicate
+			dmem:4[sp] = t0;    // write duplicate
+			ip = ip + 1;
+		};
+
+
+		// sp = sp + imm16 (sign-extend via xor/sub)
+		instruction addi_sp = { 0010 0111, imm16 as value } {
+			// branchless sign-extend 16 -> 32: (x ^ 0x8000) - 0x8000
+			t0 = value;
+			t0 = t0 ^ 0x8000;
+			t0 = t0 - 0x8000;
+			sp = (sp + t0) & 0xffff;   // keep sp within 16-bit data space
+			ip = ip + 3;
+		};
+
+		// hp = hp + top_of_stack; pops value
+		instruction addhp = { 0010 1110 } {
+			hp = hp + dmem:4[sp];
+			sp = sp + 4;
+			ip = ip + 1;
+		};
+
+		// push current bp
+		instruction pushbp = { 0010 1001 } {
+			sp = sp - 4;
+			dmem:4[sp] = bp;
+			ip = ip + 1;
+		};
+
+		// push current hp
+		instruction pushhp = { 0010 1010 } {
+			sp = sp - 4;
+			dmem:4[sp] = hp;
+			ip = ip + 1;
+		};
+
+		// load dword at [bp + disp], push to stack (disp sign-extended)
+		instruction ldbp = { 0010 1011, imm16 as disp } {
+			// branchless sign-extend
+			t0 = disp;
+			t0 = t0 ^ 0x8000;
+			t0 = t0 - 0x8000;
+			t1 = (bp + t0) & 0xffff;    // mask to 16-bit data space
+			sp = sp - 4;
+			dmem:4[sp] = dmem:4[t1];
+			ip = ip + 3;
+		};
+
+		// store dword to [bp + disp]; pops value (disp sign-extended)
+		instruction stbp = { 0010 1100, imm16 as disp } {
+			// branchless sign-extend
+			t0 = disp;
+			t0 = t0 ^ 0x8000;
+			t0 = t0 - 0x8000;
+			t1 = dmem:4[sp];
+			t2 = (bp + t0) & 0xffff;    // mask to 16-bit data space
+			dmem:4[t2] = t1;
+			sp = sp + 4;
+			ip = ip + 3;
+		};
+
+		// set bp = sp (use before first call to establish caller bp)
+		instruction setbp = { 0010 1101 } {
+			bp = sp;
+			ip = ip + 1;
+		};
+
+		// --- io using rin/rout ports ---
+
+		// read byte from input port, push zero-extended to 32-bit
+		instruction inb = { 0001 1100 } {
+			sp = sp - 4;
+			dmem:4[sp] = rin;
+			ip = ip + 1;
+		};
+
+		// pop 32-bit, write low byte to output port
+		instruction outb = { 0001 1101 } {
+			rout = dmem:4[sp];
+			sp = sp + 4;
+			ip = ip + 1;
+		};
+
+		// --- arithmetic (32-bit) ---
+
+		// add: pop b, pop a, push (a + b)
+		instruction add = { 0001 1110 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = t1 + t0;
+			ip = ip + 1;
+		};
+
+		// shift left: pop count, pop value, push (value << (count & 31)) or (value >> (-count & 31)) if count < 0
+		instruction shl = { 0001 1111 } {
+			t0 = dmem:4[sp];             // count
+			t1 = dmem:4[sp + 4];         // value
+			t2 = (t0 & 0x80000000) > 0;
+			sp = sp + 4;
+			if t2 then {
+				// negative: shift right by -count
+				t2 = (0 - t0) & 0x1f;
+				dmem:4[sp] = t1 >> t2;
+			} else {
+				// positive or zero: shift left
+				dmem:4[sp] = t1 << (t0 & 0x1f);
+			}
+			ip = ip + 1;
+		};
+
+		// shift right logical: pop count, pop value, push (value >> (count & 31)) or (value << (-count & 31)) if count < 0
+		instruction shr = { 0010 0000 } {
+			t0 = dmem:4[sp];             // count
+			t1 = dmem:4[sp + 4];         // value
+			t2 = (t0 & 0x80000000) > 0;
+			sp = sp + 4;
+			if t2 then {
+				// negative: shift left by -count
+				t2 = (0 - t0) & 0x1f;
+				dmem:4[sp] = t1 << t2;
+			} else {
+				// positive or zero: shift right
+				dmem:4[sp] = t1 >> (t0 & 0x1f);
+			}
+			ip = ip + 1;
+		};
+
+		// subtract: pop b, pop a, push (a - b)
+		instruction sub = { 0100 0000 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = t1 - t0;
+			ip = ip + 1;
+		};
+
+		// multiply: pop b, pop a, push (a * b)
+		instruction mul = { 0100 0001 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = t1 * t0;
+			ip = ip + 1;
+		};
+
+		// divide: pop b, pop a, push (a / b) (no div-by-zero handling)
+		instruction div = { 0100 0010 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = t1 / t0;
+			ip = ip + 1;
+		};
+
+		// modulo: pop b, pop a, push (a % b)
+		instruction mod = { 0100 0011 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = t1 % t0;
+			ip = ip + 1;
+		};
+
+		// bitwise or: pop b, pop a, push (a | b)
+		instruction bor = { 0100 0100 } {
+			t0 = dmem:4[sp];
+			t1 = dmem:4[sp + 4];
+			sp = sp + 4;
+			dmem:4[sp] = t1 | t0;
+			ip = ip + 1;
+		};
+
+		// bitwise and: pop b, pop a, push (a & b)
+		instruction band = { 0100 0101 } {
+			t0 = dmem:4[sp];
+			t1 = dmem:4[sp + 4];
+			sp = sp + 4;
+			dmem:4[sp] = t1 & t0;
+			ip = ip + 1;
+		};
+
+		// bitwise xor: pop b, pop a, push (a ^ b)
+		instruction bxor = { 0100 0110 } {
+			t0 = dmem:4[sp];
+			t1 = dmem:4[sp + 4];
+			sp = sp + 4;
+			dmem:4[sp] = t1 ^ t0;
+			ip = ip + 1;
+		};
+
+		// logical or: pop b, pop a, push (a!=0 || b!=0 ? 1 : 0)
+		instruction lor = { 0100 0111 } {
+			t0 = dmem:4[sp];
+			t1 = dmem:4[sp + 4];
+			sp = sp + 4;
+			dmem:4[sp] = ((t1 | t0) != 0);
+			ip = ip + 1;
+		};
+
+		// logical and: pop b, pop a, push (a!=0 && b!=0 ? 1 : 0)
+		instruction land = { 0100 1000 } {
+			t0 = dmem:4[sp];
+			t1 = dmem:4[sp + 4];
+			sp = sp + 4;
+			dmem:4[sp] = ((t1 & t0) != 0);
+			ip = ip + 1;
+		};
+
+		// logical not (unary): push (!a) where result is 1/0
+		instruction not_u = { 0100 1001 } {
+			t0 = dmem:4[sp];
+			dmem:4[sp] = (t0 == 0);
+			ip = ip + 1;
+		};
+
+		// bitwise not (unary)
+		instruction bnot_u = { 0100 1010 } {
+			t0 = dmem:4[sp];
+			dmem:4[sp] = ~t0;
+			ip = ip + 1;
+		};
+
+		// --- comparison operations (32-bit) ---
+
+		// equal: pop b, pop a, push (a == b ? 1 : 0)
+		instruction eq = { 0100 1011 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = (t1 == t0);
+			ip = ip + 1;
+		};
+
+		// not equal: pop b, pop a, push (a != b ? 1 : 0)
+		instruction ne = { 0100 1100 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = (t1 != t0);
+			ip = ip + 1;
+		};
+
+		// greater than: pop b, pop a, push (a > b ? 1 : 0)
+		instruction gt = { 0100 1101 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			// signed comparison: check signs first
+			t2 = (t1 & 0x80000000) > 0;  // a is negative?
+			if t2 != ((t0 & 0x80000000) > 0) then {
+				// different signs: positive > negative
+				dmem:4[sp] = (t2 == 0);   // a > b if a is positive (t2=0)
+			} else {
+				// same signs: use unsigned comparison
+				dmem:4[sp] = (t1 > t0);
+			}
+			ip = ip + 1;
+		};
+
+		// less than: pop b, pop a, push (a < b ? 1 : 0)
+		instruction lt = { 0100 1110 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			// signed comparison: check signs first
+			t2 = (t1 & 0x80000000) > 0;  // a is negative?
+			if t2 != ((t0 & 0x80000000) > 0) then {
+				// different signs: negative < positive
+				dmem:4[sp] = (t2 > 0);   // a < b if a is negative (t2=1 means a negative, so a < b)
+			} else {
+				// same signs: use unsigned comparison
+				dmem:4[sp] = (t1 < t0);
+			}
+			ip = ip + 1;
+		};
+
+		// greater than or equal: pop b, pop a, push (a >= b ? 1 : 0)
+		instruction ge = { 0100 1111 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			// signed comparison: check signs first
+			t2 = (t1 & 0x80000000) > 0;  // a is negative?
+			if t2 != ((t0 & 0x80000000) > 0) then {
+				// different signs: positive >= negative
+				dmem:4[sp] = (t2 == 0);   // a >= b if a is positive (t2=0)
+			} else {
+				// same signs: use unsigned comparison
+				dmem:4[sp] = (t1 >= t0);
+			}
+			ip = ip + 1;
+		};
+
+		// less than or equal: pop b, pop a, push (a <= b ? 1 : 0)
+		instruction le = { 0101 0000 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			// signed comparison: check signs first
+			t2 = (t1 & 0x80000000) > 0;  // a is negative?
+			if t2 != ((t0 & 0x80000000) > 0) then {
+				// different signs: negative <= positive
+				dmem:4[sp] = (t2 > 0);   // a <= b if a is negative (t2=1 means a negative, so a <= b)
+			} else {
+				// same signs: use unsigned comparison
+				dmem:4[sp] = (t1 <= t0);
+			}
+			ip = ip + 1;
+		};
+
+		// --- unsigned comparison operations (32-bit) ---
+
+		// greater than (unsigned): pop b, pop a, push (a > b ? 1 : 0)
+		instruction gt_u = { 0101 0001 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = (t1 > t0);      // unsigned comparison
+			ip = ip + 1;
+		};
+
+		// less than (unsigned): pop b, pop a, push (a < b ? 1 : 0)
+		instruction lt_u = { 0101 0010 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = (t1 < t0);      // unsigned comparison
+			ip = ip + 1;
+		};
+
+		// greater than or equal (unsigned): pop b, pop a, push (a >= b ? 1 : 0)
+		instruction ge_u = { 0101 0011 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = (t1 >= t0);     // unsigned comparison
+			ip = ip + 1;
+		};
+
+		// less than or equal (unsigned): pop b, pop a, push (a <= b ? 1 : 0)
+		instruction le_u = { 0101 0100 } {
+			t0 = dmem:4[sp];             // b
+			t1 = dmem:4[sp + 4];         // a
+			sp = sp + 4;
+			dmem:4[sp] = (t1 <= t0);     // unsigned comparison
+			ip = ip + 1;
+		};
+
+	mnemonics:
+		format plain1 is "{1}";
+		format plain0 is "";
+
+		mnemonic jmp for jmp(target) plain1;
+		mnemonic jz(target) plain1;
+		mnemonic jnz(target) plain1;
+		mnemonic call(target) plain1;
+		mnemonic ret();
+		mnemonic hlt();
+
+		mnemonic ldsp(value) plain1;
+		mnemonic ldhp(value) plain1;
+
+		mnemonic push(value) plain1;
+		mnemonic drop() plain0;
+		mnemonic load1() plain0;
+		mnemonic load2() plain0;
+		mnemonic load() plain0;
+		mnemonic store1() plain0;
+		mnemonic store2() plain0;
+		mnemonic store() plain0;
+
+		mnemonic inb() plain0;
+		mnemonic outb() plain0;
+
+		mnemonic swap() plain0;
+		mnemonic dup() plain0;
+		mnemonic addi_sp(value) plain1;
+		mnemonic addhp() plain0;
+		mnemonic pushbp() plain0;
+		mnemonic pushhp() plain0;
+		mnemonic ldbp(disp) plain1;
+		mnemonic stbp(disp) plain1;
+		mnemonic setbp() plain0;
+
+		mnemonic add() plain0;
+		mnemonic shl() plain0;
+		mnemonic shr() plain0;
+		mnemonic sub() plain0;
+		mnemonic mul() plain0;
+		mnemonic div() plain0;
+		mnemonic mod() plain0;
+		mnemonic bor() plain0;
+		mnemonic band() plain0;
+		mnemonic bxor() plain0;
+		mnemonic lor() plain0;
+		mnemonic land() plain0;
+		mnemonic not_u() plain0;
+		mnemonic bnot_u() plain0;
+
+		mnemonic eq() plain0;
+		mnemonic ne() plain0;
+		mnemonic gt() plain0;
+		mnemonic lt() plain0;
+		mnemonic ge() plain0;
+		mnemonic le() plain0;
+
+		mnemonic gt_u() plain0;
+		mnemonic lt_u() plain0;
+		mnemonic ge_u() plain0;
+		mnemonic le_u() plain0;
+}
+

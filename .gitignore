@@ -1,0 +1,9 @@
+﻿out/
+python/__pycache__/
+**/__pycache__/
+*.pyc
+*.dll
+*.so
+*.dylib
+node_modules/
+.DS_Store

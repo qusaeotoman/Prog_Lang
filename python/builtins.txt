@@ -1,0 +1,21 @@
+
+alloc:
+     ; frame layout: [bp] saved bp, [bp+4] return, [bp+8] size_shift, [bp+12] len
+     ldbp 12       ; push len
+     ldbp 8        ; push size_shift
+     shl           ; total_bytes = len << size_shift
+     pushhp        ; old hp -> will be return value
+     stbp 8        ; store return value at [bp+8], pop old hp
+     addhp         ; hp = hp + total_bytes, pop total
+     ret
+
+read_byte:      ; Builtin function: read_byte()
+    inb         ; read in byte
+    stbp 8      ; store at bp + 8
+    ret
+
+send_byte:      ; Builtin function: send_byte(b: byte)
+    ldbp 8      ; load bp + 8
+    outb        ; send byte
+    ret
+    
